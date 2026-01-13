@@ -29,6 +29,68 @@ export class CopyManager {
         return serializer.serializeToString(clone);
     }
 
+    private static async blobToDataUrl(blob: Blob): Promise<string> {
+        return await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result as string);
+            reader.onerror = reject;
+            reader.readAsDataURL(blob);
+        });
+    }
+
+    private static async svgToPngDataUrl(blob: Blob): Promise<string> {
+        // 解析 SVG 获取合适的画布大小
+        const svgText = await blob.text();
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(svgText, 'image/svg+xml');
+        const svg = doc.documentElement;
+
+        let width = parseFloat(svg.getAttribute('width') || '');
+        let height = parseFloat(svg.getAttribute('height') || '');
+
+        // 如果没有宽高，尝试从 viewBox 中获取
+        if ((!width || !height) && svg.getAttribute('viewBox')) {
+            const viewBox = svg.getAttribute('viewBox')!.split(/\s+/);
+            if (viewBox.length === 4) {
+                width = parseFloat(viewBox[2]);
+                height = parseFloat(viewBox[3]);
+            }
+        }
+
+        // 兜底尺寸，避免 0 尺寸导致渲染失败
+        if (!width || !height) {
+            width = 1200;
+            height = 800;
+        }
+
+        const serializedSvg = new XMLSerializer().serializeToString(svg);
+        const url = URL.createObjectURL(new Blob([serializedSvg], { type: 'image/svg+xml' }));
+
+        return await new Promise((resolve, reject) => {
+            const image = new Image();
+            image.onload = () => {
+                const canvas = document.createElement('canvas');
+                canvas.width = width;
+                canvas.height = height;
+                const ctx = canvas.getContext('2d');
+                if (!ctx) {
+                    URL.revokeObjectURL(url);
+                    reject(new Error('Failed to create canvas context'));
+                    return;
+                }
+                ctx.drawImage(image, 0, 0, width, height);
+                const dataUrl = canvas.toDataURL('image/png');
+                URL.revokeObjectURL(url);
+                resolve(dataUrl);
+            };
+            image.onerror = () => {
+                URL.revokeObjectURL(url);
+                reject(new Error('Failed to render SVG to canvas'));
+            };
+            image.src = url;
+        });
+    }
+
     private static async processImages(container: HTMLElement): Promise<void> {
         const images = container.querySelectorAll('img');
         const imageArray = Array.from(images);
@@ -37,15 +99,14 @@ export class CopyManager {
             try {
                 const response = await fetch(img.src);
                 const blob = await response.blob();
-                const reader = new FileReader();
-                await new Promise((resolve, reject) => {
-                    reader.onload = () => {
-                        img.src = reader.result as string;
-                        resolve(null);
-                    };
-                    reader.onerror = reject;
-                    reader.readAsDataURL(blob);
-                });
+
+                if (blob.type === 'image/svg+xml' || img.src.startsWith('data:image/svg+xml')) {
+                    // 将 SVG（例如 Excalidraw 导出的）转换成 PNG，避免公众号不支持 SVG
+                    const pngDataUrl = await this.svgToPngDataUrl(blob);
+                    img.src = pngDataUrl;
+                } else {
+                    img.src = await this.blobToDataUrl(blob);
+                }
             } catch (error) {
                 console.error('图片转换失败:', error);
             }
